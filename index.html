@@ -2,7 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#19181b" media="(prefers-color-scheme: dark)">
     <meta name="description"
           content="GAP — Groups, Algorithms, Programming — running entirely in your browser via WebAssembly.">
     <title>GAP in your browser</title>
@@ -15,6 +18,16 @@
       window.coi = { coepCredentialless: () => false };
     </script>
     <script src="coi-serviceworker.js"></script>
+    <script>
+      // Apply a saved light/dark choice before first paint (no flash).
+      // No saved choice means "auto": follow the system setting.
+      try {
+        var t = localStorage.getItem("gap-theme");
+        if (t === "light" || t === "dark") {
+          document.documentElement.setAttribute("data-theme", t);
+        }
+      } catch (e) { /* storage blocked: stay on auto */ }
+    </script>
     <link rel="stylesheet" href="vendor/xterm.css">
     <style>
       /* Fonts and colours follow www.gap-system.org (Ubuntu fonts,
@@ -46,7 +59,9 @@
       }
 
       :root {
+        color-scheme: light dark;
         --gap-crimson: #dc143c;
+        --accent-text: #b8102f;      /* crimson with >= 4.5:1 on light surfaces */
         --bg: #ffffff;
         --bg-soft: #f7f7f7;
         --card: #ffffff;
@@ -55,9 +70,35 @@
         --text-soft: #57565c;
         --link: #205caa;
         --logo-chip: transparent;
+        --focus: #205caa;
+        --err: #b00020;
+        --radius: 8px;
+        --tap: 44px;                 /* minimum touch target */
+        --sans: "Ubuntu", system-ui, -apple-system, "Segoe UI", Roboto,
+                "Helvetica Neue", Arial, sans-serif;
+        --mono: "Ubuntu Mono", ui-monospace, "SF Mono", Menlo, Consolas,
+                "Liberation Mono", monospace;
+      }
+      /* Theme: "auto" (no data-theme) follows the system; the header
+         toggle sets data-theme to "light" or "dark" and remembers it. */
+      :root[data-theme="light"] { color-scheme: light; }
+      :root[data-theme="dark"] {
+        color-scheme: dark;
+        --accent-text: #ff6b87;
+        --bg: #19181b;
+        --bg-soft: #232227;
+        --card: #232227;
+        --border: #44434a;
+        --text: #e9e6cc;
+        --text-soft: #b4b1a0;
+        --link: #8ab4e8;
+        --focus: #8ab4e8;
+        --err: #ff8a9b;
+        --logo-chip: #f7f7f7;
       }
       @media (prefers-color-scheme: dark) {
-        :root {
+        :root:not([data-theme]) {
+          --accent-text: #ff6b87;
           --bg: #19181b;
           --bg-soft: #232227;
           --card: #232227;
@@ -65,75 +106,183 @@
           --text: #e9e6cc;
           --text-soft: #b4b1a0;
           --link: #8ab4e8;
+          --focus: #8ab4e8;
+          --err: #ff8a9b;
           --logo-chip: #f7f7f7;
         }
       }
+      .visually-hidden {
+        position: absolute !important;
+        width: 1px; height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+      }
+      .theme-toggle { padding: 0 12px; color: var(--text); border-color: var(--border); }
+      .theme-toggle:hover { color: #fff; }
+      .theme-toggle svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
-      * { box-sizing: border-box; }
+      *, *::before, *::after { box-sizing: border-box; }
+      html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
       body {
         margin: 0;
-        font-family: "Ubuntu", -apple-system, "Segoe UI", Roboto,
-                     "Helvetica Neue", Arial, sans-serif;
+        font-family: var(--sans);
+        font-size: 1rem;
+        line-height: 1.5;
         color: var(--text);
         background: var(--bg-soft);
         display: flex;
         flex-direction: column;
         min-height: 100vh;
+        min-height: 100dvh;
+        /* Keep content clear of notches and rounded corners (iOS/Android). */
+        padding-left: env(safe-area-inset-left);
+        padding-right: env(safe-area-inset-right);
+        -webkit-tap-highlight-color: transparent;
       }
-      a { color: var(--link); }
+      a { color: var(--link); text-underline-offset: 2px; }
       code {
-        font-family: "Ubuntu Mono", Menlo, Consolas, monospace;
+        font-family: var(--mono);
+        font-size: 0.95em;
         background: var(--bg-soft);
         border: 1px solid var(--border);
         padding: 0 4px;
         border-radius: 3px;
+        overflow-wrap: anywhere;
       }
 
+      /* Visible keyboard focus everywhere. */
+      :focus-visible {
+        outline: 3px solid var(--focus);
+        outline-offset: 2px;
+        border-radius: 3px;
+      }
+
+      .skip-link {
+        position: absolute;
+        left: 12px;
+        top: -100px;
+        z-index: 100;
+        padding: 10px 16px;
+        background: var(--card);
+        color: var(--text);
+        border: 2px solid var(--gap-crimson);
+        border-radius: var(--radius);
+      }
+      .skip-link:focus { top: calc(8px + env(safe-area-inset-top)); }
+
+      /* ---------- Header (logo + site navigation) ---------- */
       header.site-header {
+        background: var(--card);
+        border-bottom: 3px solid var(--gap-crimson);
+        padding-top: env(safe-area-inset-top);
+      }
+      .header-inner {
         display: flex;
         align-items: center;
-        gap: 16px;
+        flex-wrap: wrap;
+        gap: 8px 20px;
         padding: 10px 20px;
-        background: var(--card);
-        border-bottom: 2px solid var(--gap-crimson);
+        /* Full width on purpose: the logo stays in the top-left corner
+           of the window, even on very wide screens. */
+      }
+      .logo-link {
+        display: inline-flex;
+        flex-shrink: 0;
+        order: -1;   /* always first, whatever else is reordered */
+        border-radius: var(--radius);
       }
       .site-logo {
+        display: block;
         height: 46px;
+        width: auto;
         background: var(--logo-chip);
         border-radius: 6px;
         padding: 2px 4px;
       }
-      .site-title h1 { margin: 0; font-size: 20px; font-weight: 700; }
-      .site-title p { margin: 2px 0 0 0; font-size: 13px; color: var(--text-soft); }
-      .header-spacer { flex: 1; }
+      nav.site-nav { margin-left: auto; }
+      nav.site-nav ul {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 2px 6px;
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      nav.site-nav a {
+        display: inline-flex;
+        align-items: center;
+        min-height: var(--tap);
+        padding: 0 12px;
+        color: var(--text);
+        text-decoration: none;
+        font-weight: 700;
+        border-radius: var(--radius);
+      }
+      nav.site-nav a:hover { color: var(--accent-text); background: var(--bg-soft); }
+      nav.site-nav a[aria-current="page"] {
+        color: var(--accent-text);
+        box-shadow: inset 0 -3px 0 var(--gap-crimson);
+        border-radius: var(--radius) var(--radius) 0 0;
+      }
+
+      /* ---------- Page title + toolbar ---------- */
+      .page-head {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px 16px;
+        max-width: 1600px;
+        width: 100%;
+        margin: 0 auto;
+        padding: 14px 20px 0;
+      }
+      .page-head .titles { flex: 1 1 320px; min-width: 0; }
+      .page-head h1 { margin: 0; font-size: clamp(1.25rem, 1rem + 1.2vw, 1.75rem); line-height: 1.25; }
+      .page-head p { margin: 2px 0 0; font-size: 0.9rem; color: var(--text-soft); max-width: 75ch; }
+
       .gap-button {
         font: inherit;
-        font-size: 14px;
-        color: var(--gap-crimson);
+        font-size: 0.95rem;
+        min-height: var(--tap);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        color: var(--accent-text);
         background: transparent;
         border: 1px solid var(--gap-crimson);
-        border-radius: 4px;
-        padding: 6px 14px;
+        border-radius: var(--radius);
+        padding: 0 16px;
         cursor: pointer;
+        touch-action: manipulation;
       }
       .gap-button:hover { background: var(--gap-crimson); color: #fff; }
+      .gap-button:active { transform: translateY(1px); }
 
+      /* ---------- Status notices ---------- */
       .notice {
-        margin: 12px 20px 0 20px;
+        max-width: 1560px;
+        margin: 12px 20px 0;
         padding: 10px 16px;
         background: var(--card);
         border: 1px solid var(--border);
-        border-left: 3px solid var(--gap-crimson);
-        border-radius: 4px;
-        font-size: 14px;
+        border-left: 4px solid var(--gap-crimson);
+        border-radius: var(--radius);
+        font-size: 0.95rem;
       }
-      #unsupported { display: none; color: #b00020; border-color: #b00020; }
+      @media (min-width: 1600px) { .notice { margin-left: auto; margin-right: auto; width: calc(100% - 40px); } }
+      #unsupported { display: none; color: var(--err); border-color: var(--err); }
 
+      /* ---------- Main: terminal + side panel ---------- */
       main {
         flex: 1;
         display: flex;
         align-items: stretch;
         gap: 16px;
+        width: 100%;
+        max-width: 1600px;
+        margin: 0 auto;
         padding: 12px 20px;
         min-height: 0;
       }
@@ -142,144 +291,235 @@
         min-width: 0;
         background: #1d1d1d;
         padding: 8px;
-        border-radius: 6px;
+        border-radius: var(--radius);
         border: 1px solid var(--border);
-        height: calc(100vh - 220px);
+        height: calc(100vh - 260px);
+        height: calc(100dvh - 260px);
         min-height: 320px;
+        overflow: hidden;
       }
+      #terminal-wrap:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
       #terminal, #terminal .xterm { height: 100%; }
+      #terminal { touch-action: pan-y; }
       /* xterm's scrollbar otherwise renders as a bright white strip on
          the dark terminal background. */
-      #terminal .xterm-viewport { scrollbar-color: #555 #1d1d1d; }
+      #terminal .xterm-viewport { scrollbar-color: #666 #1d1d1d; overscroll-behavior: contain; }
       #terminal .xterm-viewport::-webkit-scrollbar { width: 10px; }
       #terminal .xterm-viewport::-webkit-scrollbar-track { background: #1d1d1d; }
-      #terminal .xterm-viewport::-webkit-scrollbar-thumb {
-        background: #555;
-        border-radius: 5px;
-      }
+      #terminal .xterm-viewport::-webkit-scrollbar-thumb { background: #666; border-radius: 5px; }
 
       #side-panel {
-        width: 290px;
+        width: 300px;
         flex-shrink: 0;
         display: flex;
         flex-direction: column;
         gap: 16px;
+        min-width: 0;
       }
-      .panel {
+      details.panel {
         background: var(--card);
         border: 1px solid var(--border);
-        border-radius: 6px;
-        padding: 12px 14px;
-        font-size: 14px;
+        border-radius: var(--radius);
+        padding: 0 14px 12px;
+        font-size: 0.95rem;
       }
-      .panel h2 {
-        margin: 0 0 8px 0;
-        font-size: 14px;
+      details.panel > summary {
+        display: flex;
+        align-items: center;
+        min-height: var(--tap);
+        margin: 0 -14px;
+        padding: 0 14px;
+        font-size: 1.05rem;
         font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        color: var(--gap-crimson);
-      }
-      .panel p.hint { margin: 8px 0 0 0; font-size: 12.5px; color: var(--text-soft); }
-      #files-empty { margin: 4px 0; font-size: 13px; color: var(--text-soft); }
-      #file-list, #example-list {
+        color: var(--accent-text);
+        cursor: pointer;
         list-style: none;
-        margin: 0;
-        padding: 0;
+        border-radius: var(--radius);
       }
+      details.panel > summary::-webkit-details-marker { display: none; }
+      details.panel > summary::after {
+        content: "";
+        margin-left: auto;
+        width: 8px; height: 8px;
+        border-right: 2px solid currentColor;
+        border-bottom: 2px solid currentColor;
+        transform: rotate(45deg);
+        transition: transform 0.15s;
+      }
+      details.panel[open] > summary::after { transform: rotate(-135deg); }
+      .panel p.hint { margin: 10px 0 0; font-size: 0.85rem; color: var(--text-soft); }
+      #files-empty { margin: 8px 0 4px; font-size: 0.9rem; color: var(--text-soft); }
+      #upload-button { margin-top: 4px; }
+      #file-list, #example-list { list-style: none; margin: 0; padding: 0; }
       #file-list li {
         display: flex;
         align-items: center;
-        gap: 6px;
-        padding: 5px 0;
+        gap: 8px;
+        padding: 6px 0;
         border-top: 1px solid var(--border);
       }
       #file-list li:first-child { border-top: none; }
       .file-text { flex: 1; min-width: 0; }
       .file-name {
         display: block;
-        font-family: "Ubuntu Mono", monospace;
+        font-family: var(--mono);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      .file-meta { display: block; font-size: 12px; color: var(--text-soft); }
+      .file-meta { display: block; font-size: 0.8rem; color: var(--text-soft); }
       .icon-button {
         font: inherit;
-        font-size: 15px;
+        font-size: 1rem;
         line-height: 1;
-        color: var(--gap-crimson);
+        min-width: var(--tap);
+        min-height: var(--tap);
+        color: var(--accent-text);
         background: transparent;
         border: 1px solid var(--border);
-        border-radius: 4px;
-        padding: 4px 7px;
+        border-radius: var(--radius);
         cursor: pointer;
+        touch-action: manipulation;
       }
       .icon-button:hover { border-color: var(--gap-crimson); }
-      #example-list li { padding: 2px 0; }
+      #example-list li { padding: 1px 0; }
       .example-button {
         font: inherit;
-        font-size: 13.5px;
+        font-size: 0.95rem;
         width: 100%;
+        min-height: var(--tap);
         text-align: left;
         color: var(--text);
         background: transparent;
         border: none;
-        border-radius: 4px;
-        padding: 5px 6px;
+        border-radius: var(--radius);
+        padding: 6px 8px;
         cursor: pointer;
+        touch-action: manipulation;
       }
-      .example-button:hover { background: var(--bg-soft); color: var(--gap-crimson); }
+      .example-button:hover { background: var(--bg-soft); color: var(--accent-text); }
 
+      /* ---------- About + footer ---------- */
       details.about {
-        margin: 0 20px 12px 20px;
-        padding: 10px 16px;
+        max-width: 1560px;
+        width: calc(100% - 40px);
+        margin: 0 auto 16px;
+        padding: 0 16px 8px;
         background: var(--card);
         border: 1px solid var(--border);
-        border-radius: 6px;
-        font-size: 14px;
+        border-radius: var(--radius);
+        font-size: 0.95rem;
       }
-      details.about summary { cursor: pointer; font-weight: 700; }
-      details.about[open] summary { margin-bottom: 8px; }
-      details.about p { margin: 8px 0; line-height: 1.45; max-width: 95ch; }
+      details.about summary {
+        min-height: var(--tap);
+        display: flex;
+        align-items: center;
+        cursor: pointer;
+        font-weight: 700;
+      }
+      details.about p { margin: 8px 0; max-width: 75ch; }
 
       footer.site-footer {
-        padding: 12px 20px;
         background: var(--card);
         border-top: 1px solid var(--border);
-        font-size: 13px;
+        padding: 8px 20px calc(8px + env(safe-area-inset-bottom));
+        font-size: 0.9rem;
         color: var(--text-soft);
       }
-
-      @media (max-width: 820px) {
-        main { flex-direction: column; }
-        #terminal-wrap { height: 60vh; }
-        #side-panel { width: auto; }
+      footer.site-footer ul {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0 8px;
+        list-style: none;
+        margin: 0 auto;
+        padding: 0;
+        max-width: 1560px;
       }
+      footer.site-footer a {
+        display: inline-flex;
+        align-items: center;
+        min-height: var(--tap);
+        padding: 0 8px;
+      }
+
+      /* ---------- Responsive ---------- */
+      @media (max-width: 900px) {
+        main { flex-direction: column; padding: 12px 12px; }
+        #terminal-wrap {
+          height: 60vh;
+          height: 60dvh;
+          min-height: 280px;
+          padding: 4px;
+        }
+        #side-panel { width: auto; }
+        .header-inner, .page-head { padding-left: 12px; padding-right: 12px; }
+        .notice { margin-left: 12px; margin-right: 12px; }
+        details.about { width: calc(100% - 24px); }
+        .theme-toggle { order: 2; margin-left: auto; }
+        nav.site-nav { order: 3; margin-left: 0; width: 100%; }
+        nav.site-nav ul { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+        nav.site-nav ul::-webkit-scrollbar { display: none; }
+        nav.site-nav a { white-space: nowrap; }
+      }
+      @media (max-height: 500px) and (orientation: landscape) {
+        #terminal-wrap { height: calc(100dvh - 120px); min-height: 200px; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { transition: none !important; animation: none !important; }
+      }
+      @media (forced-colors: active) {
+        .gap-button, .icon-button, details.panel, .notice { border: 1px solid CanvasText; }
+        :focus-visible { outline-color: Highlight; }
+      }
+      @media print { header.site-header, #side-panel, footer.site-footer { display: none; } }
     </style>
   </head>
   <body>
+    <a class="skip-link" href="#terminal-wrap">Skip to the GAP terminal</a>
+
     <header class="site-header">
-      <a href="https://www.gap-system.org" title="www.gap-system.org">
-        <img class="site-logo" src="vendor/gaplogo.svg"
-             alt="GAP — Groups, Algorithms, Programming">
-      </a>
-      <div class="site-title">
-        <h1>GAP in your browser</h1>
-        <p>A WebAssembly build of GAP running entirely in your browser —
-           no installation. For real work, performance and memory,
-           <a href="https://www.gap-system.org/install/">install GAP</a>.</p>
+      <div class="header-inner">
+        <a class="logo-link" href="https://www.gap-system.org"
+           aria-label="GAP — Groups, Algorithms, Programming: home page">
+          <img class="site-logo" src="vendor/gaplogo.svg" alt="GAP" width="120" height="46">
+        </a>
+        <nav class="site-nav" aria-label="Main">
+          <ul>
+            <li><a href="https://www.gap-system.org/">Home</a></li>
+            <li><a href="https://www.gap-system.org/install/">Install</a></li>
+            <li><a href="https://www.gap-system.org/doc/">Documentation</a></li>
+            <li><a href="https://github.com/gap-system/gap">GitHub</a></li>
+            <li><a href="#terminal-wrap" aria-current="page">Try GAP online</a></li>
+          </ul>
+        </nav>
+        <button id="theme-toggle" type="button" class="gap-button theme-toggle"
+                title="Switch between automatic, light and dark colours">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3v18"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg>
+          <span id="theme-label">Theme: Auto</span>
+        </button>
+        <span id="theme-status" class="visually-hidden" role="status" aria-live="polite"></span>
       </div>
-      <div class="header-spacer"></div>
-      <button id="restart" class="gap-button"
-              title="Stop GAP and start a fresh session (the only way to interrupt a runaway computation)">
-        Restart GAP
-      </button>
     </header>
 
-    <div id="loading" class="notice">Loading GAP…</div>
+    <div class="page-head">
+      <div class="titles">
+        <h1>GAP in your browser</h1>
+        <p>A WebAssembly build of GAP that runs entirely in your browser,
+           with no installation. For real work, performance and memory,
+           <a href="https://www.gap-system.org/install/">install GAP</a>.</p>
+      </div>
+      <button id="restart" type="button" class="gap-button"
+              title="Stop GAP and start a fresh session (the only way to interrupt a runaway computation)"
+              aria-describedby="restart-desc">
+        Restart GAP
+      </button>
+      <span id="restart-desc" hidden>Stops GAP and starts a fresh session. This is the only way to interrupt a running computation.</span>
+    </div>
 
-    <div id="unsupported" class="notice">
+    <div id="loading" class="notice" role="status" aria-live="polite">Loading GAP…</div>
+
+    <div id="unsupported" class="notice" role="alert">
       This page needs <code>SharedArrayBuffer</code>, which is only
       available when the page is served with the headers
       <code>Cross-Origin-Opener-Policy: same-origin</code> and
@@ -290,37 +530,42 @@
       use <code>etc/emscripten/serve.py</code>.
     </div>
 
-    <main>
-      <div id="terminal-wrap">
+    <noscript>
+      <div class="notice" style="color:var(--err)">GAP in your browser needs JavaScript. Please enable it and reload.</div>
+    </noscript>
+
+    <main id="main">
+      <div id="terminal-wrap" role="region" aria-label="GAP terminal">
         <div id="terminal"></div>
       </div>
 
-      <aside id="side-panel">
-        <section class="panel">
-          <h2>Files</h2>
-          <button id="upload-button" class="gap-button">⬆ Upload file…</button>
+      <aside id="side-panel" aria-label="Files and examples">
+        <details class="panel" id="files-panel" open>
+          <summary>Files</summary>
+          <button id="upload-button" type="button" class="gap-button">⬆ Upload file…</button>
           <input id="upload-input" type="file" multiple hidden>
           <p id="files-empty">Files you upload, or create from GAP (e.g.
             with <code>PrintTo</code> or <code>LogTo</code>), appear
             here.</p>
-          <ul id="file-list"></ul>
-          <p class="hint">↳ inserts <code>Read("file");</code> at the
-            prompt (press Enter to run it); ⬇ downloads the file. New
-            files show up when GAP next waits for input. Files live only
-            in this session — download anything you want to keep.</p>
-        </section>
+          <ul id="file-list" aria-label="Files in this session"></ul>
+          <p class="hint">The ↳ button inserts <code>Read("file");</code>
+            at the prompt (press Enter to run it); ⬇ downloads the file.
+            New files show up when GAP next waits for input. Files live
+            only in this session, so download anything you want to
+            keep.</p>
+        </details>
 
-        <section class="panel">
-          <h2>Examples</h2>
-          <ul id="example-list"></ul>
+        <details class="panel" id="examples-panel" open>
+          <summary>Examples</summary>
+          <ul id="example-list" aria-label="Example commands"></ul>
           <p class="hint">Inserts the command at the prompt; press Enter
             to run it.</p>
-        </section>
+        </details>
       </aside>
     </main>
 
     <details class="about">
-      <summary>What is this? &middot; Licensing</summary>
+      <summary>What is this? Licensing</summary>
       <p>
         <a href="https://www.gap-system.org">GAP</a> is a system for
         computational discrete algebra, with particular emphasis on
@@ -332,13 +577,13 @@
       </p>
       <p>
         To get started, try <code>1+1;</code>,
-        <code>Factorial(20);</code>, or <code>SymmetricGroup(5);</code> —
+        <code>Factorial(20);</code>, or <code>SymmetricGroup(5);</code>,
         or use the examples menu. The full
         <a href="https://www.gap-system.org/doc/">GAP manuals</a> apply,
         with some caveats: some packages won't load (anything that needs
         a native compiler or system library), working memory is capped,
         performance is reduced compared to a native build, and a running
-        computation cannot be interrupted — the Restart button is the
+        computation cannot be interrupted. The Restart button is the
         only way out of a loop.
       </p>
       <p>
@@ -358,16 +603,62 @@
     </details>
 
     <footer class="site-footer">
-      <a href="https://www.gap-system.org">GAP main site</a> ·
-      <a href="https://www.gap-system.org/doc/">Documentation</a> ·
-      <a href="https://www.gap-system.org/install/">Installation</a> ·
-      <a href="https://github.com/gap-system/gap">Source on GitHub</a> ·
-      <a href="https://www.gap-system.org/copyright/">Copyright</a> ·
-      <a href="#" id="reset-site"
-         title="Discard the browser's cached GAP files and service worker, then reload — use this if the page is stuck or broken">Reset
-        cached data</a>
+      <ul>
+        <li><a href="https://www.gap-system.org">GAP main site</a></li>
+        <li><a href="https://www.gap-system.org/doc/">Documentation</a></li>
+        <li><a href="https://www.gap-system.org/install/">Installation</a></li>
+        <li><a href="https://github.com/gap-system/gap">Source on GitHub</a></li>
+        <li><a href="https://www.gap-system.org/copyright/">Copyright</a></li>
+        <li><a href="#" id="reset-site"
+               title="Discard the browser's cached GAP files and service worker, then reload — use this if the page is stuck or broken">Reset cached data</a></li>
+      </ul>
     </footer>
 
+    <script>
+      // Three-state theme toggle: Auto (system) -> Light -> Dark -> Auto.
+      (function () {
+        var root = document.documentElement;
+        var btn = document.getElementById("theme-toggle");
+        var label = document.getElementById("theme-label");
+        var status = document.getElementById("theme-status");
+        var metas = document.querySelectorAll('meta[name="theme-color"]');
+        var original = Array.prototype.map.call(metas, function (m) { return m.content; });
+        var names = { auto: "Auto", light: "Light", dark: "Dark" };
+        var order = ["auto", "light", "dark"];
+
+        function current() {
+          var t = root.getAttribute("data-theme");
+          return t === "light" || t === "dark" ? t : "auto";
+        }
+        function render(announce) {
+          var t = current();
+          label.textContent = "Theme: " + names[t];
+          btn.setAttribute("aria-label", "Colour theme: " + names[t] + ". Activate to change.");
+          metas.forEach(function (m, i) {
+            m.content = t === "auto" ? original[i] : (t === "dark" ? "#19181b" : "#ffffff");
+          });
+          if (announce) status.textContent = "Colour theme set to " + names[t];
+        }
+        btn.addEventListener("click", function () {
+          var next = order[(order.indexOf(current()) + 1) % order.length];
+          if (next === "auto") root.removeAttribute("data-theme");
+          else root.setAttribute("data-theme", next);
+          try {
+            if (next === "auto") localStorage.removeItem("gap-theme");
+            else localStorage.setItem("gap-theme", next);
+          } catch (e) { /* storage blocked: choice lasts for this page view */ }
+          render(true);
+        });
+        render(false);
+      })();
+    </script>
+    <script>
+      // Collapse the Files/Examples panels on narrow screens so the
+      // terminal stays the focus; they remain one tap away.
+      if (window.matchMedia("(max-width: 900px)").matches) {
+        document.querySelectorAll("#side-panel details").forEach(d => d.open = false);
+      }
+    </script>
     <script src="vendor/xterm.min.js"></script>
     <script src="vendor/xterm-addon-fit.min.js"></script>
     <script src="vendor/xterm-pty/index.js"></script>

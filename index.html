@@ -457,9 +457,9 @@
         details.about { width: calc(100% - 24px); }
         .theme-toggle { order: 2; margin-left: auto; }
         nav.site-nav { order: 3; margin-left: 0; width: 100%; }
-        nav.site-nav ul { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
-        nav.site-nav ul::-webkit-scrollbar { display: none; }
-        nav.site-nav a { white-space: nowrap; }
+        /* Wrap instead of scrolling sideways, so every link stays visible. */
+        nav.site-nav ul { flex-wrap: wrap; }
+        nav.site-nav a { padding: 0 10px; white-space: nowrap; }
       }
       @media (max-height: 500px) and (orientation: landscape) {
         #terminal-wrap { height: calc(100dvh - 120px); min-height: 200px; }

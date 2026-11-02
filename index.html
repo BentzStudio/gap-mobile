@@ -286,21 +286,61 @@
         padding: 12px 20px;
         min-height: 0;
       }
-      #terminal-wrap {
+      .term-col {
         flex: 1;
         min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        /* Fills the window height, and grows to match the side panel
+           so there is no empty gap under the terminal. */
+        min-height: max(360px, calc(100vh - 260px));
+        min-height: max(360px, calc(100dvh - 260px));
+      }
+      /* On-screen keys for touch devices, which often lack Enter/Tab/arrows
+         for the terminal. Hidden on devices with a real keyboard. */
+      .key-bar { display: none; gap: 8px; flex-wrap: wrap; }
+      @media (pointer: coarse), (max-width: 900px) {
+        .key-bar { display: flex; }
+      }
+      .key-bar button {
+        font: inherit;
+        font-size: 1rem;
+        min-width: var(--tap);
+        min-height: var(--tap);
+        padding: 0 14px;
+        color: var(--text);
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        cursor: pointer;
+        touch-action: manipulation;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      .key-bar button.key-enter {
+        flex: 1;
+        color: #fff;
+        background: var(--gap-crimson);
+        border-color: var(--gap-crimson);
+        font-weight: 700;
+      }
+      .key-bar button:active { transform: translateY(1px); }
+      #terminal-wrap {
+        flex: 1 1 0;
+        position: relative;
+        width: 100%;
+        min-width: 0;
+        min-height: 0;
         background: #1d1d1d;
-        padding: 8px;
         border-radius: var(--radius);
         border: 1px solid var(--border);
-        height: calc(100vh - 260px);
-        height: calc(100dvh - 260px);
-        min-height: 320px;
         overflow: hidden;
       }
       #terminal-wrap:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
-      #terminal, #terminal .xterm { height: 100%; }
-      #terminal { touch-action: pan-y; }
+      /* Absolute fill gives the terminal a definite size to fit into. */
+      #terminal { position: absolute; inset: 8px; touch-action: pan-y; }
+      #terminal .xterm { height: 100%; }
       /* xterm's scrollbar otherwise renders as a bright white strip on
          the dark terminal background. */
       #terminal .xterm-viewport { scrollbar-color: #666 #1d1d1d; overscroll-behavior: contain; }
@@ -445,12 +485,14 @@
       /* ---------- Responsive ---------- */
       @media (max-width: 900px) {
         main { flex-direction: column; padding: 12px 12px; }
+        .term-col { min-height: 0; }
         #terminal-wrap {
+          flex: none;
           height: 60vh;
           height: 60dvh;
           min-height: 280px;
-          padding: 4px;
         }
+        #terminal { inset: 4px; }
         #side-panel { width: auto; }
         .header-inner, .page-head { padding-left: 12px; padding-right: 12px; }
         .notice { margin-left: 12px; margin-right: 12px; }
@@ -462,7 +504,7 @@
         nav.site-nav a { padding: 0 10px; white-space: nowrap; }
       }
       @media (max-height: 500px) and (orientation: landscape) {
-        #terminal-wrap { height: calc(100dvh - 120px); min-height: 200px; }
+        .term-col { min-height: max(200px, calc(100dvh - 120px)); }
       }
 
       @media (prefers-reduced-motion: reduce) {
@@ -535,8 +577,18 @@
     </noscript>
 
     <main id="main">
-      <div id="terminal-wrap" role="region" aria-label="GAP terminal">
-        <div id="terminal"></div>
+      <div class="term-col">
+        <div id="terminal-wrap" role="region" aria-label="GAP terminal">
+          <div id="terminal"></div>
+        </div>
+        <div class="key-bar" id="key-bar" role="toolbar" aria-label="Terminal keys">
+          <button type="button" class="key-enter" data-key="Enter" aria-label="Enter">Enter ↵</button>
+          <button type="button" data-key="Tab" aria-label="Tab">Tab</button>
+          <button type="button" data-key="ArrowUp" aria-label="Previous command (up arrow)">↑</button>
+          <button type="button" data-key="ArrowDown" aria-label="Next command (down arrow)">↓</button>
+          <button type="button" data-key="ArrowLeft" aria-label="Left arrow">←</button>
+          <button type="button" data-key="ArrowRight" aria-label="Right arrow">→</button>
+        </div>
       </div>
 
       <aside id="side-panel" aria-label="Files and examples">
@@ -653,11 +705,51 @@
       })();
     </script>
     <script>
+      // On-screen keys: send a key press to the terminal's hidden input
+      // (xterm's helper textarea), exactly as a physical key would.
+      (function () {
+        var codes = { Enter: 13, Tab: 9, ArrowLeft: 37, ArrowUp: 38,
+                      ArrowRight: 39, ArrowDown: 40 };
+        function sendKey(key) {
+          var ta = document.querySelector("#terminal .xterm-helper-textarea");
+          if (!ta) return;
+          ta.focus();
+          var ev = new KeyboardEvent("keydown", {
+            key: key, code: key, bubbles: true, cancelable: true
+          });
+          // keyCode is what xterm reads; set it explicitly for all browsers.
+          Object.defineProperty(ev, "keyCode", { get: function () { return codes[key]; } });
+          Object.defineProperty(ev, "which", { get: function () { return codes[key]; } });
+          ta.dispatchEvent(ev);
+        }
+        document.querySelectorAll("#key-bar button").forEach(function (b) {
+          var done = false;
+          // Keep the terminal focused so the on-screen keyboard stays open.
+          b.addEventListener("pointerdown", function (e) { e.preventDefault(); });
+          b.addEventListener("pointerup", function () {
+            done = true; sendKey(b.dataset.key);
+          });
+          // Keyboard / screen-reader activation (no pointer events).
+          b.addEventListener("click", function (e) {
+            if (!done) sendKey(b.dataset.key);
+            done = false;
+          });
+        });
+      })();
+    </script>
+    <script>
       // Collapse the Files/Examples panels on narrow screens so the
       // terminal stays the focus; they remain one tap away.
       if (window.matchMedia("(max-width: 900px)").matches) {
         document.querySelectorAll("#side-panel details").forEach(d => d.open = false);
       }
+      // Opening or closing a panel can change the terminal's height:
+      // ask the terminal to re-fit itself.
+      document.querySelectorAll("#side-panel details").forEach(function (d) {
+        d.addEventListener("toggle", function () {
+          window.dispatchEvent(new Event("resize"));
+        });
+      });
     </script>
     <script src="vendor/xterm.min.js"></script>
     <script src="vendor/xterm-addon-fit.min.js"></script>

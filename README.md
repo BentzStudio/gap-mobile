@@ -1,4 +1,4 @@
-## Web UI
+## Enhancing Web UI/UX
 
 The page (`index.html`) is responsive, accessible and themeable. It works on
 desktop and mobile browsers (macOS, Windows, Linux, iOS, Android).

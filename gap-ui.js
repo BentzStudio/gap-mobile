@@ -10,43 +10,6 @@
 // downloads are served from a local cache and never need to ask a
 // (possibly blocked) worker.
 
-// ---------------------------------------------------------------------
-// MAINTAINER NOTES: what was added to this file, and why
-//
-// The original file handled the terminal/worker lifecycle, uploads, the
-// files panel, the examples menu and the loading notice. Those parts are
-// unchanged except where marked below. The page redesign (index.html) needed
-// four additions here, all clearly sectioned:
-//
-//  1. SAVED STATE (section "Saved state"): files are copied to IndexedDB
-//     (database "gap-ui-state") and the command history to localStorage
-//     ("gap-history"), so both survive a reload. Restored files get status
-//     "previous", which reuses the existing re-upload-on-insert path (the
-//     same one used after "Restart GAP"). A checkbox ("Remember ...") turns
-//     saving off and deletes stored data; "Clear saved data" deletes it on
-//     request. Nothing is ever sent to a server.
-//  2. COMMAND HISTORY (section "Command history, copy output, share links"):
-//     each submitted command is read back from the terminal buffer when the
-//     user presses Enter, and listed in the History panel. It cannot be
-//     replayed into GAP's own line editor (that history lives inside the
-//     GAP process), so the panel inserts text at the prompt instead.
-//  3. COPY OUTPUT: "Copy output" (selection, or the whole buffer) and
-//     "Copy last result" (from the last submitted command). Needed because
-//     selecting text in the terminal is awkward on phones.
-//  4. SHARE LINKS: "#cmd=<base64url text>". Following a link shows the text
-//     in a dialog and inserts it at the prompt only after a click, and never
-//     runs it. Shared text is untrusted: control characters are stripped
-//     and the length is capped.
-//
-// Other notes:
-//  - The DOM ids looked up below are a contract with index.html; renaming
-//    one there breaks this file (the list is at the top of index.html).
-//  - Line endings in this file are CRLF, as in the original.
-//  - Browser support: needs SharedArrayBuffer (as before), IndexedDB and
-//    clipboard access for the new features; each falls back or fails
-//    quietly (see copyText and the try/catch blocks).
-// ---------------------------------------------------------------------
-
 "use strict";
 
 // ---- upload mailbox protocol; keep in sync with gap-worker.js ----
@@ -84,19 +47,6 @@ const uploadBtn = document.getElementById("upload-button");
 const fileListEl = document.getElementById("file-list");
 const fileEmptyEl = document.getElementById("files-empty");
 const examplesEl = document.getElementById("example-list");
-// Elements added by the redesign (history panel, saved-data controls, copy /
-// share buttons, share dialog). Features that need them check for null.
-const historyListEl = document.getElementById("history-list");
-const historyEmptyEl = document.getElementById("history-empty");
-const persistBox = document.getElementById("persist-box");
-const clearSavedBtn = document.getElementById("clear-saved");
-const copyAllBtn = document.getElementById("copy-all");
-const copyLastBtn = document.getElementById("copy-last");
-const shareBtn = document.getElementById("share-link");
-const toolStatusEl = document.getElementById("tool-status");
-const shareDialog = document.getElementById("share-dialog");
-const shareCodeEl = document.getElementById("share-code");
-const shareWarnEl = document.getElementById("share-warn");
 
 // URLs reported by gap-fs.js's fetch/XHR instrumentation, for rebuilding
 // startup_manifest.json (see README.md). Inspect from the devtools
@@ -118,161 +68,6 @@ fetch("startup_manifest.json")
 // into the new session.
 //   { size, data: Uint8Array, status: "transferring"|"ready"|"previous" }
 const fileEntries = new Map();
-
-// ---------------------------------------------------------------------
-// Saved state: files (IndexedDB) and command history (localStorage) are
-// kept on this device only, so they survive a reload. The "Remember"
-// checkbox switches saving on/off; "Clear saved data" removes it all.
-// Files restored from a previous visit get status "previous", so the
-// existing re-upload-on-insert path puts them back into the new session.
-
-const STATE_DB = "gap-ui-state";
-const FILE_STORE = "files";
-const HISTORY_KEY = "gap-history";
-const PERSIST_KEY = "gap-persist";
-const MAX_SAVED_BYTES = 50 * 1024 * 1024;
-const MAX_HISTORY = 200;
-
-// Whether files and history are saved in this browser (user setting).
-let persistOn = true;
-try { persistOn = localStorage.getItem(PERSIST_KEY) !== "off"; } catch (e) { /* storage blocked */ }
-// filesLoaded guards saving: renderFiles() runs before the stored files are
-// read back, and saving that empty state would wipe them.
-let filesLoaded = false;
-let saveTimer = null;
-// Named cmdHistory, not "history": a top-level "history" would clash with
-// window.history, which handleShareHash() uses.
-let cmdHistory = [];   // oldest first
-
-function openStateDb() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(STATE_DB, 1);
-    req.onupgradeneeded = () =>
-      req.result.createObjectStore(FILE_STORE, { keyPath: "path" });
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-function txDone(tx) {
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = tx.onabort = () => reject(tx.error);
-  });
-}
-
-async function loadSavedFiles() {
-  if (!persistOn || !window.indexedDB) return;
-  try {
-    const db = await openStateDb();
-    const req = db.transaction(FILE_STORE).objectStore(FILE_STORE).getAll();
-    const rows = await new Promise((resolve, reject) => {
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-    db.close();
-    for (const r of rows) {
-      if (!fileEntries.has(r.path)) {
-        fileEntries.set(r.path, { size: r.size, data: r.data,
-                                  status: "previous" });
-      }
-    }
-  } catch (e) {
-    console.warn("Could not load saved files:", e);
-  }
-}
-
-// Saving is debounced (500 ms) so a burst of changes writes once. The whole
-// store is rewritten each time; files are small and few, and this keeps the
-// stored copy exactly equal to the panel. Files over the 50 MB total budget
-// are skipped (with a notice) so storage quota errors stay rare.
-function scheduleSaveFiles() {
-  if (!filesLoaded || !persistOn || !window.indexedDB) return;
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveFiles, 500);
-}
-
-async function saveFiles() {
-  try {
-    const db = await openStateDb();
-    const tx = db.transaction(FILE_STORE, "readwrite");
-    const store = tx.objectStore(FILE_STORE);
-    store.clear();
-    let total = 0, skipped = 0;
-    for (const [path, e] of fileEntries) {
-      if (e.status === "transferring" || e.status === "failed") continue;
-      if (total + e.data.length > MAX_SAVED_BYTES) { skipped++; continue; }
-      total += e.data.length;
-      store.put({ path: path, size: e.size, data: e.data });
-    }
-    await txDone(tx);
-    db.close();
-    if (skipped > 0) {
-      announce(skipped + " file(s) were too large to save in this browser.");
-    }
-    if (navigator.storage && navigator.storage.persist) {
-      navigator.storage.persist();
-    }
-  } catch (e) {
-    console.warn("Could not save files:", e);
-  }
-}
-
-function loadHistory() {
-  try {
-    const v = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
-    if (Array.isArray(v)) {
-      cmdHistory = v.filter((x) => typeof x === "string").slice(-MAX_HISTORY);
-    }
-  } catch (e) { /* ignore */ }
-}
-
-function saveHistory() {
-  if (!persistOn) return;
-  try { localStorage.setItem(HISTORY_KEY, JSON.stringify(cmdHistory)); }
-  catch (e) { /* storage full or blocked */ }
-}
-
-// Empty and very long lines are ignored; consecutive duplicates are
-// collapsed. Keeps the newest MAX_HISTORY entries.
-function addHistory(cmd) {
-  cmd = cmd.trim();
-  if (cmd === "" || cmd.length > 2000) return;
-  if (cmdHistory[cmdHistory.length - 1] === cmd) return;
-  cmdHistory.push(cmd);
-  if (cmdHistory.length > MAX_HISTORY) cmdHistory.shift();
-  saveHistory();
-  renderHistory();
-}
-
-function renderHistory() {
-  if (!historyListEl) return;
-  historyListEl.textContent = "";
-  historyEmptyEl.style.display = cmdHistory.length === 0 ? "" : "none";
-  for (const cmd of cmdHistory.slice(-50).reverse()) {
-    const li = document.createElement("li");
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "example-button history-button";
-    b.textContent = cmd;
-    b.title = "Insert at the prompt: " + cmd;
-    b.addEventListener("click", () => insertAtPrompt(cmd));
-    li.append(b);
-    historyListEl.append(li);
-  }
-}
-
-// Removes everything saved in this browser (history and files). Does not
-// touch the files in the running session.
-async function clearStored() {
-  try { localStorage.removeItem(HISTORY_KEY); } catch (e) { /* ignore */ }
-  if (window.indexedDB) {
-    await new Promise((resolve) => {
-      const req = indexedDB.deleteDatabase(STATE_DB);
-      req.onsuccess = req.onerror = req.onblocked = resolve;
-    });
-  }
-}
 
 // Per-session state; replaced wholesale by startSession() so that any
 // in-flight async sender from a dead session aborts cleanly.
@@ -422,15 +217,17 @@ function renderFiles() {
 
     const insertB = document.createElement("button");
     insertB.className = "icon-button";
-    insertB.textContent = "↳";
+    insertB.innerHTML = '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4v7a3 3 0 0 0 3 3h11M15 10l4 4-4 4"/></svg>';
+    insertB.setAttribute("aria-label", "Insert Read command for " + path);
     insertB.title = "Insert Read(" + gapQuote(path) + "); at the prompt" +
       (entry.status === "previous" ? " (re-uploads the file first)" : "");
     insertB.addEventListener("click", () => insertEntry(path));
 
     const downloadB = document.createElement("button");
     downloadB.className = "icon-button";
-    downloadB.textContent = "⬇";
+    downloadB.innerHTML = '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12l7 7 7-7"/></svg>';
     downloadB.title = "Download " + path;
+    downloadB.setAttribute("aria-label", "Download " + path);
     downloadB.addEventListener("click", () => downloadEntry(path));
 
     const text = document.createElement("div");
@@ -439,12 +236,31 @@ function renderFiles() {
     li.append(text, insertB, downloadB);
     fileListEl.append(li);
   }
-  // Every change to the files panel is also persisted (debounced; no-op
-  // until the saved files have been read back, or when saving is off).
-  scheduleSaveFiles();
 }
 
+// Upload via the "Upload file..." button:
 uploadBtn.addEventListener("click", () => uploadInput.click());
+
+// Export PR files (.zip) via client-side Blob:
+const exportPrBtn = document.getElementById("export-pr-btn");
+if (exportPrBtn) {
+  exportPrBtn.addEventListener("click", async () => {
+    try {
+      const res = await fetch("gap-pr-files.zip");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "gap-pr-files.zip";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (err) {
+      console.error("Export download failed", err);
+    }
+  });
+}
 uploadInput.addEventListener("change", async () => {
   const files = [];
   for (const f of uploadInput.files) {
@@ -455,7 +271,90 @@ uploadInput.addEventListener("change", async () => {
     files.push({ name: name, data: data });
   }
   uploadInput.value = "";
-  if (files.length > 0) sendFiles(files);
+  if (files.length > 0) {
+    // Ensure the Files panel is visible to see the uploaded file
+    const fp = document.getElementById("files-panel");
+    if (fp) fp.open = true;
+    await sendFiles(files);
+    // Convenience for students: if uploading a single assignment file (e.g. lab1.g),
+    // insert Read("lab1.g"); at prompt so they just hit Enter to run it.
+    if (files.length === 1) {
+      insertAtPrompt("Read(" + gapQuote(files[0].name) + ");");
+    }
+  }
+});
+
+// ---------------------------------------------------------------------
+// Drag-and-drop file upload:
+// Allows users to drag a .g script from their computer and drop it
+// anywhere on the terminal or the page.
+//
+// Implementation notes:
+// 1. dragDepth counter: prevents child-element enter/leave events from
+//    causing the drop overlay to flicker.
+// 2. #drop-overlay on #terminal-wrap: provides visual confirmation during drag.
+// 3. Drop action: transfers bytes into GAP's virtual filesystem via sendFiles(),
+//    opens the Files panel, and inserts Read("file"); at the prompt if single file.
+const dropOverlay = document.getElementById("drop-overlay");
+const filesPanelEl = document.getElementById("files-panel");
+let dragDepth = 0;
+
+function isFileDrag(e) {
+  if (!e.dataTransfer || !e.dataTransfer.types) return false;
+  return Array.from(e.dataTransfer.types).includes("Files");
+}
+
+window.addEventListener("dragenter", (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  dragDepth++;
+  if (dropOverlay) dropOverlay.classList.add("active");
+  if (filesPanelEl) filesPanelEl.classList.add("drag-over");
+});
+
+window.addEventListener("dragover", (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "copy";
+});
+
+window.addEventListener("dragleave", (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  dragDepth--;
+  if (dragDepth <= 0) {
+    dragDepth = 0;
+    if (dropOverlay) dropOverlay.classList.remove("active");
+    if (filesPanelEl) filesPanelEl.classList.remove("drag-over");
+  }
+});
+
+window.addEventListener("drop", async (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  if (dropOverlay) dropOverlay.classList.remove("active");
+  if (filesPanelEl) filesPanelEl.classList.remove("drag-over");
+
+  const dt = e.dataTransfer;
+  if (!dt || !dt.files || dt.files.length === 0) return;
+
+  const files = [];
+  for (const f of dt.files) {
+    const name = f.name.split(/[/\\]/).pop();
+    if (name === "") continue;
+    const data = new Uint8Array(await f.arrayBuffer());
+    files.push({ name: name, data: data });
+  }
+
+  if (files.length > 0) {
+    if (filesPanelEl) filesPanelEl.open = true;
+    await sendFiles(files);
+    // Single file dropped: paste Read("..."); so student can immediately press Enter.
+    if (files.length === 1) {
+      insertAtPrompt("Read(" + gapQuote(files[0].name) + ");");
+    }
+  }
 });
 
 // ---------------------------------------------------------------------
@@ -559,17 +458,8 @@ function startSession() {
     fetchCount: 0,
     started: false,
     dead: false,
-    lastCmdRow: -1,     // buffer row where the last submitted command began
   };
   const s = session;
-
-  // Record each command the user submits (a bare Enter). The text is read
-  // back from the terminal buffer, so it is exactly what GAP shows, even
-  // after line editing or history recall. Pasted multi-line input is not
-  // recorded here (it arrives as one chunk, not a bare Enter).
-  xterm.onData((d) => {
-    if (d === "\r" && session === s) recordCommand(xterm);
-  });
 
   // GAP's first terminal output arrives as the worker's first "write"
   // tty request. Detect it here (this listener is registered before
@@ -635,295 +525,12 @@ document.getElementById("reset-site").addEventListener("click", async (ev) => {
   location.reload();
 });
 
-// ---------------------------------------------------------------------
-// Command history, copy output, share links
-
-// GAP's prompts: "gap> ", continuation "> ", and break loops "brk> " /
-// "brk_02> ". Used to find where the command text starts on a terminal line.
-const PROMPT_RE = /^(?:gap|brk(?:_\d+)?)?> ?/;
-const PROMPT_ONLY_RE = /^(?:gap|brk(?:_\d+)?)>\s*$/;
-
-// Reads the line under the cursor from the terminal buffer (joining rows that
-// were wrapped by the terminal width) and records it as a command. Called
-// when the user presses Enter. Remembers the row so "Copy last result" knows
-// where the last command began.
-function recordCommand(xterm) {
-  const buf = xterm.buffer.active;
-  let row = buf.baseY + buf.cursorY;
-  const rows = [];
-  for (;;) {
-    const line = buf.getLine(row);
-    if (!line) return;
-    rows.unshift(line);
-    if (!line.isWrapped || row === 0) break;
-    row--;
-  }
-  const text = rows.map((l, i) => l.translateToString(i === rows.length - 1)).join("");
-  const m = PROMPT_RE.exec(text);
-  if (!m) return;   // not at a GAP prompt (e.g. a program reading input)
-  session.lastCmdRow = row;
-  addHistory(text.slice(m[0].length));
-}
-
-// Terminal text from buffer row `fromRow` to the end, with wrapped rows
-// joined back into single lines and trailing blank lines dropped.
-function bufferText(xterm, fromRow) {
-  const buf = xterm.buffer.active;
-  const out = [];
-  for (let r = Math.max(0, fromRow); r < buf.length; r++) {
-    const line = buf.getLine(r);
-    if (!line) continue;
-    const next = buf.getLine(r + 1);
-    const t = line.translateToString(!(next && next.isWrapped));
-    if (line.isWrapped && out.length > 0) out[out.length - 1] += t;
-    else out.push(t);
-  }
-  while (out.length > 0 && out[out.length - 1] === "") out.pop();
-  return out;
-}
-
-// "Copy last result": the last submitted command and everything printed
-// after it, minus the fresh prompt that follows.
-function lastResultText() {
-  if (session === null || session.lastCmdRow < 0) return "";
-  const lines = bufferText(session.xterm, session.lastCmdRow);
-  if (lines.length > 1 && PROMPT_ONLY_RE.test(lines[lines.length - 1])) {
-    lines.pop();   // the fresh prompt waiting for the next command
-  }
-  return lines.join("\n");
-}
-
-function selectedText() {
-  return session !== null && session.xterm.hasSelection()
-    ? session.xterm.getSelection() : "";
-}
-
-function announce(msg) {
-  if (!toolStatusEl) return;
-  toolStatusEl.textContent = "";
-  setTimeout(() => { toolStatusEl.textContent = msg; }, 50);
-}
-
-function flash(btn, text) {
-  if (!btn.dataset.label) btn.dataset.label = btn.textContent;
-  btn.textContent = text;
-  clearTimeout(btn._flashTimer);
-  btn._flashTimer = setTimeout(() => { btn.textContent = btn.dataset.label; }, 1800);
-}
-
-// Clipboard write with a fallback for browsers/contexts where the async
-// clipboard API is unavailable (e.g. plain http). Must run from a user click.
-async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch (e) { /* fall back below (insecure context, old browser) */ }
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.setAttribute("readonly", "");
-  ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
-  document.body.append(ta);
-  ta.select();
-  let ok = false;
-  try { ok = document.execCommand("copy"); } catch (e) { /* ignore */ }
-  ta.remove();
-  return ok;
-}
-
-async function copyAndReport(btn, text, what) {
-  if (!text) {
-    announce("Nothing to copy yet.");
-    flash(btn, "Nothing to copy");
-    return;
-  }
-  const ok = await copyText(text);
-  const n = text.split("\n").length;
-  announce(ok ? "Copied " + what + " (" + n + (n === 1 ? " line)" : " lines)")
-              : "Could not copy to the clipboard.");
-  flash(btn, ok ? "Copied ✓" : "Copy failed");
-  if (session !== null) session.xterm.focus();
-}
-
-if (copyAllBtn) {
-  copyAllBtn.addEventListener("click", () => {
-    if (session === null) return;
-    const sel = selectedText();
-    copyAndReport(copyAllBtn,
-      sel || bufferText(session.xterm, 0).join("\n"),
-      sel ? "the selection" : "the output");
-  });
-  copyLastBtn.addEventListener("click", () => {
-    copyAndReport(copyLastBtn, lastResultText(), "the last result");
-  });
-}
-
-// ---- share links: #cmd=<base64url of UTF-8 text> ----
-
-// Share links carry the text in the URL hash, which is never sent to a
-// server. Base64url over UTF-8 keeps the link safe to paste anywhere.
-function encodeShare(text) {
-  const bytes = new TextEncoder().encode(text);
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function decodeShare(b64url) {
-  try {
-    const b64 = b64url.replace(/-/g, "+").replace(/_/g, "/");
-    const bin = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
-    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch (e) {
-    return null;
-  }
-}
-
-// Shared text is untrusted: drop control characters (escape sequences
-// and the like) and cap the length.
-function cleanSnippet(t) {
-  return t.replace(/\r\n?/g, "\n")
-          .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "")
-          .slice(0, 4000)
-          .replace(/\s+$/, "");
-}
-
-if (shareBtn) {
-  shareBtn.addEventListener("click", async () => {
-    const text = cleanSnippet(selectedText() ||
-      (cmdHistory.length > 0 ? cmdHistory[cmdHistory.length - 1] : ""));
-    if (!text) {
-      announce("Nothing to share yet: run a command or select text first.");
-      flash(shareBtn, "Nothing to share");
-      return;
-    }
-    const url = location.origin + location.pathname + location.search +
-                "#cmd=" + encodeShare(text);
-    if (url.length > 6000) {
-      announce("That is too long for a link.");
-      flash(shareBtn, "Too long");
-      return;
-    }
-    // Phones: the system share sheet. Elsewhere: copy the link.
-    if (navigator.share && window.matchMedia("(pointer: coarse)").matches) {
-      try {
-        await navigator.share({ title: "GAP command", url: url });
-        return;
-      } catch (e) {
-        if (e && e.name === "AbortError") return;
-      }
-    }
-    const ok = await copyText(url);
-    announce(ok ? "Link copied. It inserts the command at the prompt without running it."
-                : "Could not copy the link.");
-    flash(shareBtn, ok ? "Link copied ✓" : "Copy failed");
-  });
-}
-
-// Is GAP sitting at an empty prompt, ready for input?
-// Share links are offered only once GAP is waiting at an empty prompt, so
-// the inserted text does not land in the middle of the start-up banner.
-function atPrompt() {
-  if (session === null || !session.started) return false;
-  const buf = session.xterm.buffer.active;
-  const line = buf.getLine(buf.baseY + buf.cursorY);
-  return !!line && /^gap>\s*$/.test(line.translateToString(true));
-}
-
-function waitForPrompt(callback) {
-  const began = Date.now();
-  const timer = setInterval(() => {
-    if (atPrompt()) {
-      clearInterval(timer);
-      callback();
-    } else if (Date.now() - began > 30 * 60 * 1000) {
-      clearInterval(timer);
-    }
-  }, 300);
-}
-
-// A visitor following a share link sees the text first and decides:
-// nothing is inserted (let alone run) without a click.
-// SECURITY: never auto-insert or auto-run shared text. The visitor sees it
-// in a dialog first; the hash is removed from the address bar afterwards so
-// a reload does not offer it again.
-let pendingShare = "";
-function handleShareHash() {
-  const m = /^#cmd=([A-Za-z0-9_-]+)$/.exec(location.hash);
-  if (!m || !shareDialog) return;
-  const decoded = decodeShare(m[1]);
-  history.replaceState(null, "", location.pathname + location.search);
-  if (decoded === null) return;
-  const text = cleanSnippet(decoded);
-  if (!text) return;
-  waitForPrompt(() => {
-    pendingShare = text;
-    shareCodeEl.textContent = text;
-    shareWarnEl.hidden = !text.includes("\n");
-    if (shareDialog.showModal) shareDialog.showModal();
-    else shareDialog.setAttribute("open", "");
-  });
-}
-
-if (shareDialog) {
-  const closeShare = () => {
-    if (shareDialog.close) shareDialog.close();
-    else shareDialog.removeAttribute("open");
-  };
-  document.getElementById("share-insert").addEventListener("click", () => {
-    closeShare();
-    insertAtPrompt(pendingShare);
-  });
-  document.getElementById("share-cancel").addEventListener("click", closeShare);
-}
-window.addEventListener("hashchange", handleShareHash);
-
-// ---- saved-data controls ----
-
-if (persistBox) {
-  persistBox.checked = persistOn;
-  persistBox.addEventListener("change", () => {
-    persistOn = persistBox.checked;
-    try { localStorage.setItem(PERSIST_KEY, persistOn ? "on" : "off"); }
-    catch (e) { /* ignore */ }
-    if (persistOn) {
-      saveHistory();
-      scheduleSaveFiles();
-      announce("Saving files and history in this browser is on.");
-    } else {
-      clearStored();
-      announce("Saving is off. Stored data was removed from this browser.");
-    }
-  });
-  clearSavedBtn.addEventListener("click", async () => {
-    await clearStored();
-    cmdHistory = [];
-    renderHistory();
-    for (const [p, e] of Array.from(fileEntries)) {
-      if (e.status === "previous") fileEntries.delete(p);
-    }
-    renderFiles();
-    announce("Saved data cleared.");
-  });
-}
-
 // Without SharedArrayBuffer the worker can't talk to the page
 // synchronously; xterm-pty would stall on every read.
 if (typeof SharedArrayBuffer === "undefined") {
   loadingEl.style.display = "none";
   unsupportedEl.style.display = "block";
 } else {
-  // Start-up order: history first (instant), then GAP, then the saved files.
-  // The files load in the background so they never delay GAP's start; they
-  // appear in the panel as soon as they are read.
-  loadHistory();
-  renderHistory();
   renderFiles();
   startSession();
-  // Restore files from an earlier visit alongside GAP's startup.
-  loadSavedFiles().then(() => {
-    filesLoaded = true;
-    renderFiles();
-  });
-  handleShareHash();
 }

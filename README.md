@@ -47,3 +47,13 @@ All element IDs used by `gap-ui.js` are unchanged (`restart`, `loading`,
 - If the terminal does not re-fit after a panel is opened or closed,
   `gap-ui.js` needs a `ResizeObserver` (the page also dispatches a window
   `resize` event on panel toggle).
+
+### License and attribution
+This project is licensed under the GNU General Public License, version 2 or
+(at your option) any later version. See [LICENSE](LICENSE) for the license text
+and [COPYRIGHT](COPYRIGHT) for GAP copyright and author information.
+
+This web app is a modified version of **GAP in the browser**, developed by
+Chris Jefferson for GAP. This fork includes mobile-first changes. Bundled GAP
+packages and other third-party components may have their own license terms;
+see the relevant license and copyright files in their directories.
